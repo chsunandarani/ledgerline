@@ -17,7 +17,7 @@ A first version was built from the problem statement before the prompts below (c
 - A role change made directly in SQL left no trace at all.
 - "Production-grade" was overclaimed: every write goes through one lock, so it's correct but slow at scale.
 
-**Decision:** fix the first two in the next prompt; record the third as an accepted risk (THREATS H1).
+**Next:** my next prompt asked for audit logging and role permissions, which covered the first two. The third is recorded as an accepted risk (THREATS H1).
 
 ---
 
@@ -46,7 +46,7 @@ A first version was built from the problem statement before the prompts below (c
 - Account ids too big for a 64-bit integer → **500 error**.
 - A NUL character in a memo, account name or login username → **500 error**.
 - A password over 72 bytes → **500 error** when creating a user. (Nothing moved in any case; all are clean 400s now, with tests that fail on the old code.)
-- **The AI's explanation was wrong.** It first claimed the password issue let a *shorter* password log in (bcrypt truncation). I asked it to prove it: logging in with the shorter password was refused, and this bcrypt version raises an error instead of truncating. The real bug was only the 500. The code comment and test were corrected.
+- **The AI's explanation was wrong.** It first claimed the password issue let a *shorter* password log in (bcrypt truncation). It then tested its own claim before writing it down: logging in with the shorter password was refused, and this bcrypt version raises an error instead of truncating. The real bug was only the 500. The code comment and test were corrected.
 
 **Commit:** `9a1784b`
 

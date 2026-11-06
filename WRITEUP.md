@@ -29,7 +29,7 @@ A small money system. Three roles: admin, account holder, auditor. Accounts in r
 
 ## How I know it works
 
-184 automated tests run against a real server and a real Postgres database. They fire requests at the same instant from separate threads (up to 300 at once), replay requests, attack other people's accounts, and go straight to the database to try to edit history. A mutation script removes one lock or check at a time and confirms the tests fail. All 18 protections it removes are caught. I also attacked the running server by hand, which found bugs the tests had missed (see PROMPTS.md).
+184 automated tests run against a real server and a real Postgres database. They fire requests at the same instant from separate threads (up to 300 at once), replay requests, attack other people's accounts, and go straight to the database to try to edit history. A mutation script removes one lock or check at a time and confirms the tests fail. All 18 protections it removes are caught. The running server was also sent hostile input directly, which found bugs the tests had missed (see PROMPTS.md).
 
 ## What I deliberately did not build
 
