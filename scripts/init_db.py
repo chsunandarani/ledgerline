@@ -37,7 +37,10 @@ def main() -> None:
     parser.add_argument("--no-seed", action="store_true")
     args = parser.parse_args()
 
-    with psycopg.connect(database_url(), row_factory=dict_row, autocommit=True) as conn:
+    # Creating tables and triggers needs the owner role. If the app itself runs as the
+    # restricted ledger_app role, give the owner URL separately as MIGRATION_DATABASE_URL.
+    owner_url = os.environ.get("MIGRATION_DATABASE_URL") or database_url()
+    with psycopg.connect(owner_url, row_factory=dict_row, autocommit=True) as conn:
         conn.execute(SCHEMA_PATH.read_text())
         with conn.transaction():
             act_as(conn, label="system:init_db")

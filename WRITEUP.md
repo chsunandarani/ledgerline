@@ -26,9 +26,12 @@ A small money system: users with three roles (admin, account holder, auditor), a
 
 **Proving what happened.** The ledger tables reject UPDATE, DELETE and TRUNCATE. Every refused attempt is a row too, so a statement shows who tried what and why it was refused. Each transaction is hashed together with the previous one; `/api/audit/verify` recomputes the chain and re-adds every account from scratch. Someone who can switch triggers off (a superuser) is still caught, unless they rewrite the whole chain after the edit — which is why the head hash should be kept somewhere outside the database (not built yet).
 
+**Who did what to users and accounts.** Changes to users and accounts are logged by database triggers, not by app code, so there's no way to forget a log line and raw SQL is caught too (labelled `db:<user>` and flagged). The app tells the triggers who's acting through a setting that only lasts for the current transaction. The audit log has its own hash chain. In the database itself, the app runs as a role that can only append to history, and the auditor gets a read-only role that can't see passwords or sessions.
+
 ## What I deliberately did not build
 
-- **Maker-checker for admins.** An admin can still deposit, withdraw and reverse alone. It's all logged and flagged, but not prevented.
+- **Maker-checker for admins.** An admin can still deposit, withdraw, reverse and change roles alone. It's all logged and flagged, but not prevented.
+- **Protection from a hostile superuser.** They can switch triggers off and change a user with no audit entry (THREATS F8). The fix is shipping the audit log to storage they don't control.
 - **Multiple currencies, holds/authorisations, scheduled and batch transfers, fees, daily limits.** Each is a new way for balances to go wrong. I wanted a small system whose numbers are always right.
 - **Rate limiting** beyond login lockout.
 - **External anchoring of the hash chain head.**
@@ -43,4 +46,4 @@ See [PROMPTS.md](PROMPTS.md). Biggest catch: the mutation check showed the tests
 - Admin dual control, external anchoring, rate limits (above).
 - No load test beyond the 60-request storm in the test suite.
 - The UI is functional, not polished; no pagination on long statements beyond a limit.
-- The demo deployment runs as the database owner; `scripts/app_role.sql` is written but not applied there.
+- The demo deployment runs as the database owner unless the README's extra role steps are done; `scripts/app_role.sql` is tested but not applied automatically.

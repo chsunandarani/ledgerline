@@ -25,6 +25,8 @@ Account #1 is `EXTERNAL`, the system account on the other side of every deposit 
 - **The database enforces it too.** A CHECK keeps every customer balance >= −overdraft limit. Commit-time triggers refuse any transaction whose postings don't net to zero, any posting that doesn't continue its account's running balance, and any balance that doesn't match its last posting.
 - **Exactly once.** A unique index on (user, Idempotency-Key). Duplicates wait for the first, then return its stored result. The `request_log` table shows which arrivals were duplicates.
 - **Append-only.** Ledger tables reject UPDATE/DELETE/TRUNCATE. Each transaction is hash-chained to the previous one, so even a superuser who turns the triggers off is caught by `/api/audit/verify`.
+- **Automatic audit log.** Every change to users and accounts, and every login, is written to `audit_log` by database triggers, so no code path (not even raw SQL) can skip it. The log is append-only and has its own hash chain.
+- **Roles at two levels.** The API separates admin, holder and auditor; `scripts/app_role.sql` does the same in the database (an app role that can only append to history, and a read-only auditor role).
 
 Longer version: [WRITEUP.md](WRITEUP.md). Every attack I could think of: [THREATS.md](THREATS.md). Endpoints and who can call them: [docs/API.md](docs/API.md).
 
@@ -67,6 +69,8 @@ What they cover:
 | `test_idempotency.py` | a retry pays once; 20 simultaneous copies pay once; key reuse with a different body is rejected; refusals replay; keys are per user; the unique index alone stops duplicates |
 | `test_authorisation.py` | nobody moves or sees another person's money; holders can't create money; auditor can't write; frozen accounts don't move |
 | `test_ledger_integrity.py` | conservation; bad amounts; reversals; and direct SQL attacks: ledger rows can't be changed or deleted, a balance can't be edited without a posting, an unbalanced entry can't commit, the floor holds without the app, and superuser tampering is detected by verify |
+| `test_audit_log.py` | admin actions are audited with who did it; a role change made directly in SQL is still audited and flagged; audit entries can't be forged, backdated or silently edited; logins are audited; deactivation and role changes kill sessions; two admins demoting each other at once leave one admin |
+| `test_db_roles.py` | applies `scripts/app_role.sql`, then attacks the database as `ledger_app` (14 attempts to rewrite history or switch protections off, all refused by permissions) and as `ledger_auditor`; runs a full server as `ledger_app` to prove it works |
 
 ### Do the tests test anything?
 
@@ -100,18 +104,23 @@ Notes:
 - Free Render web services sleep after ~15 minutes idle; the first request after that takes ~30–60s.
 - Free Render Postgres expires after 30 days. Any other Postgres works: set `DATABASE_URL` and the same start command.
 - To change the seed passwords, set `SEED_ADMIN_PASSWORD`, `SEED_AUDITOR_PASSWORD`, `SEED_ALICE_PASSWORD`, `SEED_BOB_PASSWORD` before first boot.
-- Production hardening: run `scripts/app_role.sql` and point the app at the `ledger_app` role, so the app can't disable the append-only triggers (see THREATS F4).
+- **Production hardening (recommended):** run the app as the restricted `ledger_app` role, so even a compromised app can't edit history or switch the triggers off (THREATS F4):
+  1. In Render, open the database and copy its **External Database URL** (this is the owner).
+  2. `psql "<owner url>" -f scripts/app_role.sql`
+  3. `psql "<owner url>" -c "ALTER ROLE ledger_app PASSWORD 'pick-a-long-one'"`
+  4. On the web service, set `MIGRATION_DATABASE_URL` = the owner URL, and change `DATABASE_URL` to the same URL with `ledger_app:pick-a-long-one` as the user and password. Redeploy.
 
 ## Repo map
 
 ```
-app/schema.sql      tables, constraints, append-only + integrity triggers
+app/schema.sql      tables, constraints, append-only + integrity + audit triggers
 app/ledger.py       all money movement: locking, checks, postings, idempotency, hash chain
 app/audit.py        verify + flags
 app/main.py         HTTP routes, roles, validation
-app/auth.py         login, sessions, lockout
+app/auth.py         login, sessions, lockout, role checks
 app/static/         web UI
 scripts/init_db.py  schema + seed
+scripts/app_role.sql  restricted DB roles: ledger_app, ledger_auditor
 scripts/mutation_check.py
 tests/
 THREATS.md  PROMPTS.md  WRITEUP.md  docs/API.md

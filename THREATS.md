@@ -124,8 +124,8 @@ A transfer *from* an id that exists but isn't yours says `forbidden`; one that d
 **Status:** Closed.
 
 ### C8. A rogue administrator
-An admin can record deposits (bring money in), withdraw from any account, and reverse payments. There is no second approver.
-**Defence:** an admin cannot edit or delete ledger rows, cannot transfer between customer accounts, and everything they do is in the ledger or `admin_events` with their name. Reversals and large movements (>= Rs 1,00,000) are flagged for the auditor.
+An admin can record deposits (bring money in), withdraw from any account, reverse payments, change overdraft limits and change users' roles. There is no second approver.
+**Defence:** an admin cannot edit or delete ledger rows, cannot transfer between customer accounts, and everything they do is in the ledger or the trigger-written `audit_log` with their name. Role changes, limit changes, reversals and large movements are flagged for the auditor. Reversals and large movements (>= Rs 1,00,000) are flagged for the auditor.
 **Status:** Mitigated. Dual control (maker-checker) for admin money actions is the obvious next step and I chose not to build it this week.
 
 ---
@@ -172,8 +172,8 @@ All errors return one JSON shape with no stack traces. A 500 says nothing moved 
 ## F. Tampering with the record
 
 ### F1. Editing or deleting a ledger row with SQL
-**Defence:** `transactions`, `postings`, `request_log` and `admin_events` have triggers that reject UPDATE, DELETE and TRUNCATE. Accounts and users cannot be deleted.
-**Test:** `test_ledger_rows_cannot_be_changed_or_deleted` (9 cases).
+**Defence:** `transactions`, `postings`, `request_log` and `audit_log` have triggers that reject UPDATE, DELETE and TRUNCATE. Accounts and users cannot be deleted.
+**Test:** `test_ledger_rows_cannot_be_changed_or_deleted` (10 cases).
 **Status:** Closed against anyone who isn't a DB superuser or table owner.
 
 ### F2. Changing a balance without a ledger entry
@@ -188,9 +188,35 @@ Triggers don't bind someone who can disable them.
 **Status:** Mitigated. **Known gap:** someone with full DB rights could rewrite the chain from the altered row onward and update the head so it verifies again. That is only caught if somebody kept an old `head_hash` outside the database. Fix I didn't build: publish the head hash on a schedule somewhere the DB owner can't write (an email to the auditor, a signed log). For now the auditor can note `head_seq` / `head_hash` from `/api/audit/verify` by hand.
 
 ### F4. The app's own database user is powerful enough to disable triggers
-On the free hosted database the app connects as the owner.
-**Defence available:** `scripts/app_role.sql` creates a role with only SELECT/INSERT on the ledger tables. With it, a compromised app server can't edit history at all, only append visible rows.
-**Status:** Mitigated; documented in the README as a production step. Not applied on the demo deployment.
+The table owner can disable or drop triggers. If the app connects as the owner, a compromised app server can rewrite history.
+**Defence:** `scripts/app_role.sql` creates `ledger_app`, which owns nothing: SELECT/INSERT only on the ledger and audit tables, column-level UPDATE only on balance/status/limit/name (accounts) and role/active/password (users), no DELETE anywhere, and no write access to the audit chain head. It also creates a read-only `ledger_auditor` that cannot see password hashes or sessions.
+**Tests:** `tests/test_db_roles.py` connects as `ledger_app` and tries 14 attacks (UPDATE/DELETE/TRUNCATE history, disable or drop triggers, `session_replication_role`, change an account owner, move the audit head, create tables): all refused by *permissions*, not just triggers. It also runs a full server as `ledger_app` and moves money through it to prove the grants are enough.
+**Status:** Closed when deployed with `ledger_app`. On the free Render demo the app connects as the owner unless the extra role is set up (README).
+
+### F5. Escalating a user or changing an account directly in SQL
+Someone with database access makes a holder an admin, raises an overdraft limit, or unfreezes an account, without going through the app.
+**Defence:** changes to `users` and `accounts` are logged by database triggers, not by app code, so there is no code path that skips the log. If the app didn't say who is acting, the entry is labelled `db:<database user>` and raised as a high-severity flag. Balance changes are left to the ledger.
+**Test:** `test_change_made_directly_in_sql_is_still_audited_and_flagged`.
+**Status:** Closed for anyone except a superuser (see F8).
+
+### F6. Changing who owns an account
+Ownership is what decides who may move money, and the ledger reads it before taking the row lock.
+**Defence:** a trigger refuses any change to `owner_id` or `kind`, and `ledger_app` has no UPDATE right on those columns.
+**Test:** `test_account_owner_can_never_change`.
+**Status:** Closed.
+
+### F7. Editing, backdating or forging audit entries
+**Defence:** `audit_log` is append-only, and a trigger sets each entry's sequence number, timestamp and hash itself, overwriting whatever the writer supplied. Entries are hash-chained (separate chain from the money ledger) and `/api/audit/verify` recomputes the chain in Python, so a tampered database function can't vouch for itself.
+**Tests:** `test_audit_entries_cannot_be_forged_or_backdated`, `test_audit_tampering_is_detected`.
+**Status:** Mitigated; same "rewrite the whole chain" gap as F3.
+
+### F8. A superuser turns triggers off, then changes a user or account
+With `session_replication_role = replica`, the audit trigger doesn't fire, so that change leaves no audit entry at all. The hash chains don't help, because nothing was written.
+**Status:** Accepted. Only a superuser can do this (the app role and the auditor role are refused, tested). Against a hostile superuser the real fix is outside the database: stream the audit log to separate storage they don't control.
+
+### F9. The app lies about who is acting
+The audit triggers take the actor from a transaction-local setting the app provides. A compromised app server could name the wrong admin.
+**Status:** Accepted. The database guarantees no change goes *unlogged*; it trusts the app for *who*. Moving identity into the database (one DB role per user) is too heavy for this project.
 
 ---
 
@@ -216,6 +242,22 @@ The token is sent in an `Authorization` header, not a cookie, so another site ca
 ### G5. Seed credentials are public in the README
 Required by the brief so judges can log in. Anyone with the URL can act as admin on the demo. For a real deployment set `SEED_*_PASSWORD` env vars or don't seed.
 **Status:** Accepted for the demo.
+
+### G6. A removed or demoted user keeps using their old session
+**Defence:** deactivating a user or changing their role deletes all their sessions in the same transaction, and every request re-checks `is_active` from the database.
+**Tests:** `test_deactivating_a_user_cuts_off_their_session`, `test_role_change_forces_a_new_login`.
+**Status:** Closed.
+
+### G7. Two admins remove each other, leaving no admin
+**Defence:** an admin can't change their own role or deactivate themselves. When changing a user, the request locks every admin row first, so two admins demoting each other at once are serialised and the second sees there would be no admin left (422 `last_admin`).
+**Test:** `test_two_admins_demoting_each_other_at_once_leave_one_admin` holds both rows locked until both requests have authenticated and are waiting, then releases them together. (My first version of this test fired two requests and still passed with the lock removed: one usually finished first and simply revoked the other's session. The mutation check found it.)
+**Status:** Closed.
+
+### G8. Turning a holder who owns accounts into an admin or auditor
+That would leave accounts owned by someone who can't hold them, or give an account owner admin powers over their own money.
+**Defence:** refused with `owns_accounts`.
+**Test:** `test_holder_who_owns_accounts_stays_a_holder`.
+**Status:** Closed.
 
 ---
 
