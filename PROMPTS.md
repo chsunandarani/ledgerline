@@ -113,10 +113,6 @@ After deploying to https://ledgerline-4aam.onrender.com I tested it myself:
 - Tried to withdraw Rs 60,000 from an account with Rs 49,900. It was refused (insufficient_funds), recorded as txn #5 on the statement, and the balance didn't change.
 - Logged in as auditor and ran Verify: 5 transactions, 4 accounts, hash chains intact, all balances sum to 0. The audit log showed every login and logout.
 
----
-
-## My own checks on the live site
-
 After deploying to https://ledgerline-4aam.onrender.com I tested it myself.
 
 In the browser, as alice:
