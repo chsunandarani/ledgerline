@@ -32,6 +32,19 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="LedgerLine", version="1.0", lifespan=lifespan)
 
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+    )
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
 # --------------------------------------------------------------------------
 # error handling: one JSON shape for every error, no stack traces to clients
 # --------------------------------------------------------------------------
