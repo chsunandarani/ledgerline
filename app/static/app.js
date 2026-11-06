@@ -46,6 +46,7 @@ async function start() {
   $$("[data-roles]").forEach(n => n.classList.toggle("hidden", !n.dataset.roles.split(" ").includes(me.role)));
   $$("form[data-money]").forEach(f => resetKey(f));
   await refresh();
+  await loadUsers();
 }
 
 async function refresh() {
@@ -135,7 +136,7 @@ $("#userForm").addEventListener("submit", async ev => {
   const res = await api("POST", "/api/users", Object.fromEntries(new FormData(f)));
   msg.className = "msg " + (res.status === 201 ? "ok" : "err");
   msg.textContent = res.status === 201 ? `Created user #${res.data.id}` : res.data.error.message;
-  if (res.status === 201) f.reset();
+  if (res.status === 201) { f.reset(); loadUsers(); }
 });
 
 $("#accountForm").addEventListener("submit", async ev => {
@@ -161,11 +162,85 @@ $("#patchForm").addEventListener("submit", async ev => {
   refresh();
 });
 
-function showJSON(data) { $("#auditOut").replaceChildren(el("pre", {}, JSON.stringify(data, null, 2))); }
-$("#verifyBtn").addEventListener("click", async () => showJSON((await api("GET", "/api/audit/verify")).data));
-$("#flagsBtn").addEventListener("click", async () => showJSON((await api("GET", "/api/audit/flags")).data));
-$("#dupesBtn").addEventListener("click", async () => showJSON((await api("GET", "/api/audit/requests?outcome=replayed")).data));
-$("#eventsBtn").addEventListener("click", async () => showJSON((await api("GET", "/api/audit/log")).data));
+// ---- audit views: tables, not JSON ----
+function table(headers, rows, wide = true) {
+  const t = el("table", wide ? { class: "wide" } : {}, el("tr", {}, headers.map(h => el("th", {}, h))));
+  for (const r of rows) t.append(el("tr", {}, r));
+  return el("div", { class: "scroll" }, t);
+}
+const when = iso => iso.replace("T", " ").slice(0, 19);
+function describe(details) {
+  return Object.entries(details || {}).map(([k, v]) =>
+    Array.isArray(v) ? `${k}: ${v[0]} -> ${v[1]}` : `${k}: ${v}`).join(", ");
+}
+function show(...nodes) { $("#auditOut").replaceChildren(...nodes); }
+
+$("#verifyBtn").addEventListener("click", async () => {
+  const r = (await api("GET", "/api/audit/verify")).data;
+  show(el("div", { class: "ok-banner " + (r.ok ? "credit" : "sev-critical") },
+         r.ok ? `Books verified: ${r.transactions_checked} transactions, ${r.accounts_checked} accounts, hash chains intact.`
+              : `VERIFICATION FAILED - ${r.problems.length} problem(s)`),
+       r.ok ? "" : el("ul", {}, r.problems.map(p => el("li", {}, p))),
+       table(["Check", "Value"], [
+         [el("td", {}, "Sum of all balances (must be 0)"), el("td", { class: "num" }, rupees(r.sum_all_balances))],
+         [el("td", {}, "Customer money"), el("td", { class: "num" }, rupees(r.sum_customer_balances))],
+         [el("td", {}, "External money in"), el("td", { class: "num" }, rupees(r.external_in))],
+         [el("td", {}, "External money out"), el("td", { class: "num" }, rupees(r.external_out))],
+         [el("td", {}, "Ledger head (write this down)"), el("td", { class: "key wrap" }, `#${r.head_seq} ${r.head_hash}`)],
+         [el("td", {}, "Audit head (write this down)"), el("td", { class: "key wrap" }, `#${r.audit_head_seq} ${r.audit_head_hash}`)],
+       ], false));
+});
+
+$("#flagsBtn").addEventListener("click", async () => {
+  const f = (await api("GET", "/api/audit/flags")).data || [];
+  show(f.length ? table(["Severity", "What", "Detail"], f.map(x => [
+    el("td", { class: "sev-" + x.severity }, x.severity), el("td", {}, x.type.replace(/_/g, " ")),
+    el("td", { class: "wrap" }, x.detail)])) : el("p", { class: "muted" }, "Nothing flagged."));
+});
+
+$("#eventsBtn").addEventListener("click", async () => {
+  const rows = (await api("GET", "/api/audit/log?limit=300")).data || [];
+  show(table(["#", "When (UTC)", "Who", "Action", "Target", "Details"], rows.map(e => [
+    el("td", {}, String(e.seq)), el("td", { class: "nowrap" }, when(e.at)),
+    el("td", { class: e.actor_label.startsWith("db:") ? "sev-high" : "" }, e.actor_label),
+    el("td", {}, e.action.replace(/_/g, " ")), el("td", {}, `${e.target_type} ${e.target_id ?? ""}`),
+    el("td", { class: "wrap" }, describe(e.details))])));
+});
+
+$("#dupesBtn").addEventListener("click", async () => {
+  const rows = (await api("GET", "/api/audit/requests?outcome=replayed&limit=300")).data || [];
+  show(rows.length ? table(["When (UTC)", "User", "Endpoint", "Idempotency-Key", "Answered with txn"], rows.map(r => [
+    el("td", { class: "nowrap" }, when(r.received_at)), el("td", {}, r.username), el("td", {}, r.endpoint),
+    el("td", { class: "key wrap" }, r.idempotency_key), el("td", {}, String(r.transaction_id))]))
+    : el("p", { class: "muted" }, "No duplicate requests yet."));
+});
+
+// ---- admin: users ----
+async function loadUsers() {
+  if (!me || me.role !== "admin") return;
+  const users = (await api("GET", "/api/users")).data || [];
+  const t = $("#users");
+  t.replaceChildren(el("tr", {}, ["Id", "User", "Role", "Active", ""].map(h => el("th", {}, h))));
+  for (const u of users) {
+    const role = el("select", {}, ["holder", "auditor", "admin"].map(r => {
+      const o = el("option", { value: r }, r); if (r === u.role) o.selected = true; return o; }));
+    const self = u.id === me.id;
+    if (self) role.disabled = true;
+    const toggle = el("button", { class: "ghost" }, u.is_active ? "Deactivate" : "Reactivate");
+    if (self) toggle.disabled = true;
+    const save = async body => {
+      const r = await api("PATCH", `/api/users/${u.id}`, body);
+      const msg = $("#usersMsg");
+      msg.className = "msg " + (r.status === 200 ? "ok" : "err");
+      msg.textContent = r.status === 200 ? `Updated ${u.username}.` : r.data.error.message;
+      loadUsers();
+    };
+    role.addEventListener("change", () => save({ role: role.value }));
+    toggle.addEventListener("click", () => save({ is_active: !u.is_active }));
+    t.append(el("tr", {}, el("td", {}, String(u.id)), el("td", {}, u.username), el("td", {}, role),
+      el("td", {}, u.is_active ? "yes" : "no"), el("td", {}, toggle)));
+  }
+}
 
 $("#loginForm").addEventListener("submit", async ev => {
   ev.preventDefault();

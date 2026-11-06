@@ -10,6 +10,10 @@
     --accent: #1f5c4a; --accent-ink: #ffffff; --debit: #a23b2a; --credit: #1f6b3a; --refused: #8a6d1d;
     --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   }
+  @media (max-width: 600px) {
+    header h1 span { display: block; font-size: 13px; }
+    th, td { padding: 6px 4px; font-size: 13px; }
+  }
   @media (prefers-color-scheme: dark) {
     :root {
       --bg: #141516; --panel: #1c1e20; --ink: #e9e7e1; --muted: #9a9ea5; --line: #2d3033;
@@ -18,11 +22,22 @@
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
-  header { display: flex; justify-content: space-between; align-items: center; padding: 14px 20px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  header { display: flex; flex-wrap: wrap; gap: 8px; justify-content: space-between; align-items: center; padding: 14px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
   header h1 { font-size: 18px; margin: 0; letter-spacing: .2px; }
   header h1 span { color: var(--muted); font-weight: 400; }
   main { max-width: 1100px; margin: 0 auto; padding: 20px 16px 60px; display: grid; gap: 16px; }
-  .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+  .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(min(300px, 100%), 1fr)); }
+  /* grid children default to min-width:auto, which let wide tables push the page sideways */
+  main > *, #app > *, .grid > * { min-width: 0; }
+  .tabs { display: flex; flex-wrap: wrap; gap: 8px; }
+  .tabs button { margin-top: 0; }
+  .sev-critical, .sev-high { color: var(--debit); font-weight: 600; }
+  .sev-medium { color: var(--refused); }
+  .ok-banner { padding: 10px 12px; border-radius: 7px; border: 1px solid var(--line); margin-top: 12px; }
+  td.wrap { white-space: normal; word-break: break-word; min-width: 180px; }
+  table.wide { min-width: 720px; }  /* scrolls inside its box on phones; the page itself never does */
+  td.nowrap { white-space: nowrap; }
+  td select, td button { width: auto; margin: 0; padding: 4px 8px; }
   section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; }
   section h2 { font-size: 15px; margin: 0 0 12px; }
   label { display: block; font-size: 13px; color: var(--muted); margin: 8px 0 4px; }
@@ -149,13 +164,22 @@
       </section>
     </div>
 
+    <section data-roles="admin">
+      <h2>Users</h2>
+      <div class="scroll"><table id="users"></table></div>
+      <div class="msg" id="usersMsg"></div>
+      <p class="muted">Changing a role or deactivating someone logs them out. You can't change yourself.</p>
+    </section>
+
     <section data-roles="admin auditor">
       <h2>Audit</h2>
-      <button id="verifyBtn">Verify the ledger</button>
-      <button class="ghost" id="flagsBtn">Flags</button>
-      <button class="ghost" id="dupesBtn">Duplicate requests</button>
-      <button class="ghost" id="eventsBtn">Admin actions</button>
-      <div class="msg" id="auditOut"></div>
+      <div class="tabs">
+        <button id="verifyBtn">Verify the ledger</button>
+        <button class="ghost" id="flagsBtn">Flags</button>
+        <button class="ghost" id="eventsBtn">Audit log</button>
+        <button class="ghost" id="dupesBtn">Duplicate requests</button>
+      </div>
+      <div id="auditOut"></div>
     </section>
 
     <section id="statementBox" class="hidden">
