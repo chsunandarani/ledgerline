@@ -87,8 +87,14 @@ CAUGHT   remove the lock on the hash-chain head
 CAUGHT   remove the database balance floor CHECK
 CAUGHT   remove the append-only triggers
 CAUGHT   remove the system-account guard
+CAUGHT   remove the lock on admin rows when changing users
+CAUGHT   remove the audit trigger on users
+CAUGHT   remove the audit trigger on accounts
+CAUGHT   stop telling the audit log who the admin is on account changes
+CAUGHT   remove the trigger that freezes account owner
+CAUGHT   give the app's DB role UPDATE/DELETE on the ledger
 survives (expected) remove the post-lock idempotency re-check (shortcut only)
-11/11 mutations behaved as expected
+17/17 mutations behaved as expected
 ```
 
 The last one is meant to survive: that re-check is only a shortcut, and the unique index is what actually guarantees exactly-once.
