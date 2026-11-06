@@ -33,6 +33,7 @@ def test_three_hundred_simultaneous_requests(admin, make_holder, make_account, v
 
     calls, meta = [], []
     dup_keys = [new_key() for _ in range(10)]
+    theft_keys = [new_key() for _ in range(3)]  # few keys, many copies each: a real pile-up
     dup_payloads = {}
     for i in range(300):
         kind = rng.choice(["withdraw", "transfer", "transfer", "duplicate", "steal", "deposit"])
@@ -59,6 +60,20 @@ def test_three_hundred_simultaneous_requests(admin, make_holder, make_account, v
             thief = rng.choice([x for x in holders if x is not h])
             b = rng.choice([x for x in accounts if owner[x] is thief])
             c = fresh_client(thief)
+            if rng.random() < 0.5:
+                # Replayed thefts: refusals must replay correctly under load too.
+                # This does NOT reliably prove the unique index on (user, key): at this
+                # load the server queues requests, so copies rarely truly overlap (tried
+                # with the index removed: passed 6/6). The targeted 20-copy test and the
+                # direct-SQL test in test_idempotency.py do prove it (failed 6/6).
+                k = rng.choice(theft_keys)
+                if k not in dup_payloads:
+                    dup_payloads[k] = (thief, a, b, amt)
+                thief, a, b, amt = dup_payloads[k]
+                c = fresh_client(thief)
+                calls.append(lambda c=c, a=a, b=b, amt=amt, k=k: c.transfer(a, b, amt, key=k))
+                meta.append(("duplicate", k))
+                continue
             calls.append(lambda c=c, a=a, b=b, amt=amt: c.transfer(a, b, amt))
         else:
             c = fresh_client(admin)
