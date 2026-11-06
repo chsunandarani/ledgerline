@@ -43,6 +43,7 @@ async def security_headers(request: Request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["Cache-Control"] = "no-store"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000"
     return response
 
 # --------------------------------------------------------------------------
@@ -196,6 +197,13 @@ def idem_key(idempotency_key: str | None = Header(default=None)) -> str:
     return idempotency_key
 
 
+def _still(conn, actor: Actor, *roles: str) -> None:
+    """Same re-check as the ledger does, for admin and account writes."""
+    fresh = ledger.current_rights(conn, actor)
+    if fresh.role not in roles:
+        raise HTTPException(403, detail={"code": "forbidden", "message": f"This needs role: {', '.join(roles)}."})
+
+
 def _money(actor: Actor, endpoint: str, op: dict, key: str) -> JSONResponse:
     status, view, replayed = ledger.execute(actor, endpoint, op, key)
     headers = {"Idempotent-Replayed": "true" if replayed else "false"}
@@ -264,6 +272,7 @@ def create_user(body: UserIn, actor: Actor = Depends(auth.require("admin"))):
     pw = auth.hash_password(body.password)
     with pool().connection() as conn:
         with conn.transaction():
+            _still(conn, actor, "admin")
             act_as(conn, actor.id)
             try:
                 row = conn.execute(
@@ -295,7 +304,12 @@ def patch_user(user_id: PathId, body: UserPatch, actor: Actor = Depends(auth.req
             act_as(conn, actor.id)
             # Lock every admin row so two admins demoting each other at once can't
             # leave the system with none.
-            conn.execute("SELECT id FROM users WHERE role = 'admin' ORDER BY id FOR UPDATE")
+            admin_rows = conn.execute(
+                "SELECT id, is_active FROM users WHERE role = 'admin' ORDER BY id FOR UPDATE").fetchall()
+            # Re-check the caller under the same lock (not a separate share lock: two admins
+            # each holding one and waiting for the other's would deadlock).
+            if not any(r["id"] == actor.id and r["is_active"] for r in admin_rows):
+                raise HTTPException(403, detail={"code": "forbidden", "message": "You are no longer an active admin."})
             user = conn.execute("SELECT * FROM users WHERE id = %s FOR UPDATE", (user_id,)).fetchone()
             if user is None:
                 raise HTTPException(404, detail={"code": "user_not_found", "message": "No such user."})
@@ -350,6 +364,7 @@ def create_account(body: AccountIn, actor: Actor = Depends(auth.require("admin",
         owner_id = body.owner_id
     with pool().connection() as conn:
         with conn.transaction():
+            _still(conn, actor, "admin", "holder")
             act_as(conn, actor.id)
             owner = conn.execute("SELECT role FROM users WHERE id = %s", (owner_id,)).fetchone()
             if owner is None or owner["role"] != "holder":
@@ -382,6 +397,7 @@ def patch_account(account_id: PathId, body: AccountPatch, actor: Actor = Depends
     with pool().connection() as conn:
         with conn.transaction():
             conn.execute("SET LOCAL lock_timeout = '5s'")
+            _still(conn, actor, "admin")
             act_as(conn, actor.id)
             acct = conn.execute("SELECT * FROM accounts WHERE id = %s FOR UPDATE", (account_id,)).fetchone()
             if acct is None:

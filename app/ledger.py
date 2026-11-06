@@ -105,6 +105,7 @@ def execute(actor: Actor, endpoint: str, op: dict, idem_key: str) -> tuple[int, 
         try:
             with conn.transaction():
                 _set_timeouts(conn)
+                actor = current_rights(conn, actor)
                 existing = _find_by_key(conn, actor.id, idem_key)
                 if existing is None:
                     txn_id = _perform(conn, actor, op, idem_key, rhash)
@@ -129,6 +130,7 @@ def execute(actor: Actor, endpoint: str, op: dict, idem_key: str) -> tuple[int, 
 
         # Replay path: the key has already been used by this user.
         with conn.transaction():
+            current_rights(conn, actor)
             existing = _find_by_key(conn, actor.id, idem_key)
             if existing is None:  # pragma: no cover - would mean the winner rolled back
                 raise LedgerError(503, "busy", "Retry with the same Idempotency-Key.")
@@ -154,6 +156,20 @@ def execute(actor: Actor, endpoint: str, op: dict, idem_key: str) -> tuple[int, 
                 "This Idempotency-Key was already used for a different request. Nothing was moved.",
             )
         return _status_for(view), view, True
+
+
+def current_rights(conn, actor: Actor) -> Actor:
+    """Re-read the user's role and active flag inside the caller's transaction, with a
+    share lock. Authentication happened earlier, in a separate query; if the user was
+    deactivated or demoted since, this is the answer that counts. The share lock makes
+    an admin's change to this user wait until we commit (or vice versa), so the two
+    always happen in one order or the other."""
+    row = conn.execute(
+        "SELECT role, is_active FROM users WHERE id = %s FOR SHARE", (actor.id,)
+    ).fetchone()
+    if row is None or not row["is_active"]:
+        raise LedgerError(401, "session_revoked", "This user is no longer active. Nothing was moved.")
+    return Actor(id=actor.id, username=actor.username, role=row["role"])
 
 
 def _status_for(view: dict) -> int:

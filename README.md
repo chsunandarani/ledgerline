@@ -70,6 +70,7 @@ What they cover:
 | `test_authorisation.py` | nobody moves or sees another person's money; holders can't create money; auditor can't write; frozen accounts don't move |
 | `test_ledger_integrity.py` | conservation; bad amounts; reversals; and direct SQL attacks: ledger rows can't be changed or deleted, a balance can't be edited without a posting, an unbalanced entry can't commit, the floor holds without the app, and superuser tampering is detected by verify |
 | `test_audit_log.py` | admin actions are audited with who did it; a role change made directly in SQL is still audited and flagged; audit entries can't be forged, backdated or silently edited; logins are audited; deactivation and role changes kill sessions; two admins demoting each other at once leave one admin |
+| `test_hardening.py` | a user deactivated, or an admin demoted, while their request is in flight can't move money; SQL injection payloads are stored as plain text; new admins are flagged; HSTS is sent |
 | `test_db_roles.py` | applies `scripts/app_role.sql`, then attacks the database as `ledger_app` (14 attempts to rewrite history or switch protections off, all refused by permissions) and as `ledger_auditor`; runs a full server as `ledger_app` to prove it works |
 
 ### Do the tests test anything?
@@ -88,13 +89,14 @@ CAUGHT   remove the database balance floor CHECK
 CAUGHT   remove the append-only triggers
 CAUGHT   remove the system-account guard
 CAUGHT   remove the lock on admin rows when changing users
+CAUGHT   remove the in-transaction re-check of the user's rights
 CAUGHT   remove the audit trigger on users
 CAUGHT   remove the audit trigger on accounts
 CAUGHT   stop telling the audit log who the admin is on account changes
 CAUGHT   remove the trigger that freezes account owner
 CAUGHT   give the app's DB role UPDATE/DELETE on the ledger
 survives (expected) remove the post-lock idempotency re-check (shortcut only)
-17/17 mutations behaved as expected
+18/18 mutations behaved as expected
 ```
 
 The last one is meant to survive: that re-check is only a shortcut, and the unique index is what actually guarantees exactly-once.

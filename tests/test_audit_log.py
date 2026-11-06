@@ -186,9 +186,11 @@ def test_two_admins_demoting_each_other_at_once_leave_one_admin(sql, base_url, a
             t.join(timeout=30)
 
         codes = sorted(r.status_code for r in results.values())
-        assert codes == [200, 422], [r.text for r in results.values()]
-        refused = next(r for r in results.values() if r.status_code == 422)
-        assert refused.json()["error"]["code"] == "last_admin"
+        # The loser is refused either because it has just been demoted (403) or
+        # because it would remove the last admin (422). Either way, never both succeed.
+        assert codes in ([200, 403], [200, 422]), [r.text for r in results.values()]
+        refused = next(r for r in results.values() if r.status_code != 200)
+        assert refused.json()["error"]["code"] in ("forbidden", "last_admin")
         admins = sql.execute("SELECT count(*) AS n FROM users WHERE role = 'admin' AND is_active").fetchone()["n"]
         assert admins == 1
     finally:

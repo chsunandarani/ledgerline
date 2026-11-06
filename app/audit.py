@@ -199,6 +199,14 @@ def flags(conn) -> list[dict]:
                     "detail": f"user {r['target_id']} changed by {r['actor_label']}: {r['details']}"})
 
     for r in conn.execute(
+        """SELECT seq, actor_label, details FROM audit_log
+            WHERE action = 'user_created' AND details->>'role' = 'admin'
+              AND actor_label <> 'system:init_db' ORDER BY seq DESC LIMIT 200"""
+    ).fetchall():
+        out.append({"severity": "medium", "type": "admin_created", "audit_seq": r["seq"],
+                    "detail": f"new admin {r['details'].get('username')!r} created by {r['actor_label']}"})
+
+    for r in conn.execute(
         """SELECT seq, actor_label, target_id, details FROM audit_log
             WHERE action = 'account_updated' AND details ? 'overdraft_limit' ORDER BY seq DESC LIMIT 200"""
     ).fetchall():

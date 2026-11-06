@@ -6,6 +6,17 @@ Each entry says **Status**: *Closed* (defended and tested), *Mitigated* (made mu
 
 Tests named below are in `tests/`. `scripts/mutation_check.py` removes one lock or check at a time and confirms the tests fail (results in the README).
 
+## Quick map
+
+| Attack | Entries |
+|---|---|
+| Race conditions (overdraw, lost update, deadlock, double reversal, admin changes) | A1–A6, G7, G9 |
+| Double spending | A1, A2, B1, B2, C3 |
+| Replay attacks (retries, double clicks, replayed calls, reused tokens) | B1–B8, G2, G6 |
+| SQL injection and hostile input | D1–D6 |
+| Privilege escalation (other people's money, role abuse, DB-level) | C1–C8, F4–F6, F9, G6–G9 |
+| Tampering with the record | F1–F8 |
+
 ---
 
 ## A. Races and concurrency
@@ -144,7 +155,9 @@ An admin can record deposits (bring money in), withdraw from any account, revers
 **Defence:** request models use `extra="forbid"`. **Status:** Closed.
 
 ### D4. SQL injection
-**Defence:** every query is parameterised. **Status:** Closed.
+**Defence:** every query is parameterised; there is no SQL built from strings anywhere in the app (checked by searching the code for f-strings and `.format` in queries). The only dynamic SQL is in `schema.sql`, which uses `format('%I')` on a fixed list of table names.
+**Test:** `test_injection_strings_are_stored_as_plain_text` sends classic payloads (`'; DROP TABLE postings; --`, `1 OR 1=1`, dollar-quoting, format placeholders) in memos, account names and the login username; they are stored and shown back literally and the books still verify.
+**Status:** Closed.
 
 ### D5. Integer overflow
 Balances are BIGINT (about 9.2 x 10^18 paise). With a Rs 1 crore cap per transaction it would take around 9 billion maximum deposits to overflow. Postgres would raise an error rather than wrap, so it would fail loudly, not corrupt.
@@ -264,6 +277,21 @@ That would leave accounts owned by someone who can't hold them, or give an accou
 **Defence:** refused with `owns_accounts`.
 **Test:** `test_holder_who_owns_accounts_stays_a_holder`.
 **Status:** Closed.
+
+### G9. Rights checked too early (deactivated or demoted mid-request)
+Rights were checked when the request was authenticated, but the money moved in a later database transaction. A user deactivated in between could still withdraw; an admin demoted in between could still deposit (create money). **This was a real hole until 6 Nov**, found while reviewing this file.
+**Defence:** every write re-reads the user's role and active flag inside the same database transaction that moves the money, with a share lock on the user row. An admin's change to that user then waits for the money request to commit, or the money request waits for the change and sees it. Either order is consistent; no request acts on stale rights. Admin user changes re-check the caller under the admin-row lock they already take (a separate share lock there would deadlock two admins).
+**Tests:** `test_user_deactivated_mid_request_cannot_move_money`, `test_admin_demoted_mid_request_cannot_deposit`. Both hold the user's row changed-but-uncommitted while the request authenticates, then commit while it waits. Before the fix both moved money (201); removing the re-check makes them fail again (mutation check).
+**Status:** Closed.
+
+### G10. Downgrade to plain HTTP
+**Defence:** `Strict-Transport-Security` on every response (Render serves HTTPS).
+**Status:** Closed for browsers that have seen the site once; first visit relies on the host's redirect.
+
+### G11. A rogue admin quietly creates another admin
+**Defence:** allowed (admins manage users) but logged automatically and raised as an `admin_created` flag for the auditor.
+**Test:** `test_creating_an_admin_is_flagged`.
+**Status:** Mitigated (no second approver; see C8).
 
 ---
 
