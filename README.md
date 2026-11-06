@@ -3,7 +3,7 @@
 Moves money between accounts so that the books always balance, the same request never pays twice, and you can prove what happened.
 
 **Live:** https://ledgerline-4aam.onrender.com
-**Demo video:** *(link)*
+**Demo video:** https://drive.google.com/file/d/1fFPEWu3SHkY9Qpw2RFeuHs2p1AZDthld/view?usp=sharing
 
 Stack: Python 3.12, FastAPI, PostgreSQL 16, a plain HTML + JavaScript page. I picked Postgres because every guarantee here (row locks, unique indexes, CHECK constraints, triggers that run at commit) lives in the database and holds no matter which code path writes.
 
