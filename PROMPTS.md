@@ -112,3 +112,22 @@ After deploying to https://ledgerline-4aam.onrender.com I tested it myself:
 - Logged in as alice and double-clicked Send on a Rs 100 transfer to account 4. Only one transfer was made (txn #4) and the balance went to Rs 49,900. The auditor's "Duplicate requests" list was empty, so the second click was stopped by the page and never reached the server. The server-side protection is covered by the tests, not by this check.
 - Tried to withdraw Rs 60,000 from an account with Rs 49,900. It was refused (insufficient_funds), recorded as txn #5 on the statement, and the balance didn't change.
 - Logged in as auditor and ran Verify: 5 transactions, 4 accounts, hash chains intact, all balances sum to 0. The audit log showed every login and logout.
+
+---
+
+## My own checks on the live site
+
+After deploying to https://ledgerline-4aam.onrender.com I tested it myself.
+
+In the browser, as alice:
+- Double-clicked Send on a Rs 100 transfer to account 4. Only one transfer was made (txn #4) and the balance went from Rs 50,000 to Rs 49,900. The auditor's "Duplicate requests" list was empty, so the second click was stopped by the page and never reached the server.
+- Tried to withdraw Rs 60,000 from an account holding Rs 49,900. It was refused (insufficient_funds), recorded on the statement as txn #5, and the balance didn't change.
+
+As auditor:
+- Ran Verify: 5 transactions, 4 accounts, hash chains intact, all balances sum to 0. The audit log showed every login and logout.
+
+Calling the live API directly from PowerShell (not through the form):
+- As alice, tried to move Rs 5,000 out of Bob's account. The server refused it (403, forbidden) and recorded the attempt.
+- Sent the same Rs 1 payment twice with the same idempotency key. Both answers came back as txn #7, the second marked as a replay, and the balance dropped by Rs 1, not Rs 2.
+
+Getting the PowerShell test to run took a few tries: the variables were lost when I opened a new terminal, Windows PowerShell needed TLS 1.2 switched on before Render would accept the connection, and pasting several lines at once joined two commands together. In the end I put the calls in a script file.
