@@ -7,11 +7,12 @@ from pathlib import Path
 from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Path as PathParam
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from psycopg import errors
-from pydantic import BaseModel, ConfigDict, Field, StrictInt
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StrictInt
 
 from . import audit, auth, ledger
 from .db import act_as, close_pool, init_pool, pool
@@ -99,9 +100,31 @@ async def _unexpected(_: Request, exc: Exception):
 # request models
 # --------------------------------------------------------------------------
 
+MAX_ID = 2**63 - 1  # Postgres BIGINT; larger ids crashed the DB call with a 500
+
+
+def _no_control_chars(v: str) -> str:
+    # Postgres TEXT cannot hold NUL (it was a 500), and control characters in names
+    # and memos only make statements harder to read.
+    if any(ord(c) < 32 or ord(c) == 127 for c in v):
+        raise ValueError("must not contain control characters")
+    return v
+
+
+def _password_ok(v: str) -> str:
+    # bcrypt cannot take a password over 72 bytes (this library raises, which was a
+    # 500 on user creation), and NUL bytes are unsafe across bcrypt implementations.
+    if "\x00" in v:
+        raise ValueError("must not contain NUL")
+    if len(v.encode()) > 72:
+        raise ValueError("must be at most 72 bytes")
+    return v
+
+
 Amount = Annotated[StrictInt, Field(gt=0, le=MAX_AMOUNT, description="Paise. 100 = Rs 1.")]
-Memo = Annotated[str, Field(default="", max_length=200)]
-AccountId = Annotated[StrictInt, Field(gt=0)]
+Memo = Annotated[str, Field(default="", max_length=200), AfterValidator(_no_control_chars)]
+AccountId = Annotated[StrictInt, Field(gt=0, le=MAX_ID)]
+PathId = Annotated[int, PathParam(gt=0, le=MAX_ID)]
 
 
 class Strict(BaseModel):
@@ -109,13 +132,13 @@ class Strict(BaseModel):
 
 
 class LoginIn(Strict):
-    username: str = Field(max_length=40)
-    password: str = Field(max_length=200)
+    username: Annotated[str, Field(max_length=40), AfterValidator(_no_control_chars)]
+    password: Annotated[str, Field(max_length=200), AfterValidator(_password_ok)]
 
 
 class UserIn(Strict):
     username: str = Field(pattern=r"^[a-z0-9_.-]{3,40}$")
-    password: str = Field(min_length=10, max_length=200)
+    password: Annotated[str, Field(min_length=10), AfterValidator(_password_ok)]
     role: Literal["admin", "holder", "auditor"]
 
 
@@ -125,7 +148,7 @@ class UserPatch(Strict):
 
 
 class AccountIn(Strict):
-    name: str = Field(min_length=1, max_length=80)
+    name: Annotated[str, Field(min_length=1, max_length=80), AfterValidator(_no_control_chars)]
     owner_id: AccountId | None = None
 
 
@@ -260,7 +283,7 @@ def list_users(_: Actor = Depends(auth.require("admin", "auditor"))):
 
 
 @app.patch("/api/users/{user_id}")
-def patch_user(user_id: int, body: UserPatch, actor: Actor = Depends(auth.require("admin"))):
+def patch_user(user_id: PathId, body: UserPatch, actor: Actor = Depends(auth.require("admin"))):
     """Administrative override on a user: change role, deactivate, reactivate."""
     if body.role is None and body.is_active is None:
         raise HTTPException(400, detail={"code": "nothing_to_change", "message": "Send role and/or is_active."})
@@ -339,13 +362,13 @@ def create_account(body: AccountIn, actor: Actor = Depends(auth.require("admin",
 
 
 @app.get("/api/accounts/{account_id}")
-def get_account(account_id: int, actor: Actor = Depends(auth.current_actor)):
+def get_account(account_id: PathId, actor: Actor = Depends(auth.current_actor)):
     with pool().connection() as conn:
         return _account_visible(conn, actor, account_id)
 
 
 @app.get("/api/accounts/{account_id}/statement")
-def get_statement(account_id: int, limit: int = 500, actor: Actor = Depends(auth.current_actor)):
+def get_statement(account_id: PathId, limit: int = 500, actor: Actor = Depends(auth.current_actor)):
     limit = max(1, min(limit, 5000))
     with pool().connection() as conn:
         acct = _account_visible(conn, actor, account_id)
@@ -353,7 +376,7 @@ def get_statement(account_id: int, limit: int = 500, actor: Actor = Depends(auth
 
 
 @app.patch("/api/accounts/{account_id}")
-def patch_account(account_id: int, body: AccountPatch, actor: Actor = Depends(auth.require("admin"))):
+def patch_account(account_id: PathId, body: AccountPatch, actor: Actor = Depends(auth.require("admin"))):
     if body.status is None and body.overdraft_limit is None:
         raise HTTPException(400, detail={"code": "nothing_to_change", "message": "Send status and/or overdraft_limit."})
     with pool().connection() as conn:
@@ -408,7 +431,7 @@ def reverse(body: ReversalIn, key: str = Depends(idem_key), actor: Actor = Depen
 
 
 @app.get("/api/transactions/{txn_id}")
-def get_transaction(txn_id: int, actor: Actor = Depends(auth.current_actor)):
+def get_transaction(txn_id: PathId, actor: Actor = Depends(auth.current_actor)):
     with pool().connection() as conn:
         t = conn.execute("SELECT from_account_id, to_account_id FROM transactions WHERE id = %s", (txn_id,)).fetchone()
         if t is None:

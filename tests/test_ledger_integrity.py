@@ -157,3 +157,51 @@ def test_tampering_by_a_superuser_is_detected(sql, admin, make_holder, make_acco
         sql.execute("UPDATE transactions SET memo = '' WHERE id = %s", (txn,))
         sql.execute("SET session_replication_role = origin")
     verify_ok()
+
+
+# ---------------------------------------------------------------------------
+# hostile input must be a clean 4xx, never a 500
+# (ids beyond BIGINT and NUL characters were 500s until found by probing)
+# ---------------------------------------------------------------------------
+
+BIG = 10**20
+
+
+@pytest.mark.parametrize("path,body", [
+    ("/api/transfers", {"from_account_id": 1, "to_account_id": BIG, "amount": 1}),
+    ("/api/transfers", {"from_account_id": BIG, "to_account_id": 1, "amount": 1}),
+    ("/api/withdrawals", {"account_id": 2**63, "amount": 1}),
+    ("/api/deposits", {"account_id": BIG, "amount": 1}),
+    ("/api/reversals", {"transaction_id": BIG}),
+    ("/api/withdrawals", {"account_id": 1, "amount": 1, "memo": "a\u0000b"}),
+    ("/api/withdrawals", {"account_id": 1, "amount": 1, "memo": "line\nbreak"}),
+    ("/api/accounts", {"name": "a\u0000b"}),
+])
+def test_hostile_money_input_is_rejected_cleanly(make_holder, path, body):
+    h = make_holder()
+    r = h.post(path, body, new_key())
+    assert r.status_code == 400, r.text
+
+
+@pytest.mark.parametrize("path", [
+    "/api/accounts/99999999999999999999",
+    "/api/accounts/99999999999999999999/statement",
+    "/api/transactions/99999999999999999999",
+    "/api/accounts/0",
+])
+def test_out_of_range_path_ids_are_rejected_cleanly(make_holder, path):
+    assert make_holder().get(path).status_code in (400, 404)
+
+
+def test_login_with_nul_is_rejected_cleanly(base_url):
+    import httpx
+    r = httpx.post(base_url + "/api/auth/login", json={"username": "a\u0000b", "password": "x"})
+    assert r.status_code == 400
+
+
+@pytest.mark.parametrize("password", ["secret-pass\u0000anything", "x" * 73])
+def test_passwords_bcrypt_cannot_handle_are_refused(admin, password):
+    """Over 72 bytes made bcrypt raise (a 500 on user creation). NUL is refused because
+    some bcrypt implementations stop reading at it."""
+    r = admin.post("/api/users", {"username": "pw" + new_key()[-8:], "password": password, "role": "holder"})
+    assert r.status_code == 400, r.text

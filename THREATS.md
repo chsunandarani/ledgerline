@@ -150,6 +150,12 @@ An admin can record deposits (bring money in), withdraw from any account, revers
 Balances are BIGINT (about 9.2 x 10^18 paise). With a Rs 1 crore cap per transaction it would take around 9 billion maximum deposits to overflow. Postgres would raise an error rather than wrap, so it would fail loudly, not corrupt.
 **Status:** Accepted.
 
+### D6. Junk that the database can't store
+Ids larger than a 64-bit integer, NUL characters in memos, account names or usernames, and passwords over 72 bytes (bcrypt's limit) all reached the database or bcrypt and came back as 500 errors. Nothing moved, but a 500 tells an attacker they found an edge, and it looks like a broken system to a judge.
+**Defence:** ids are bounded to the BIGINT range (body and path), names/memos/usernames reject control characters, passwords reject NUL and anything over 72 bytes. All are clean 400s now.
+**Tests:** `test_hostile_money_input_is_rejected_cleanly`, `test_out_of_range_path_ids_are_rejected_cleanly`, `test_login_with_nul_is_rejected_cleanly`, `test_passwords_bcrypt_cannot_handle_are_refused`. Found by sending hostile input to the running server, not by the test suite.
+**Status:** Closed.
+
 ---
 
 ## E. Partial failure
