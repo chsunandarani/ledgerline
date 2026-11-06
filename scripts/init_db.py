@@ -13,7 +13,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from app.auth import hash_password
-from app.db import SCHEMA_PATH, close_pool, database_url
+from app.db import SCHEMA_PATH, act_as, close_pool, database_url
 from app.ledger import EXTERNAL_ACCOUNT_NAME, Actor, execute
 
 SEED_USERS = [
@@ -40,6 +40,7 @@ def main() -> None:
     with psycopg.connect(database_url(), row_factory=dict_row, autocommit=True) as conn:
         conn.execute(SCHEMA_PATH.read_text())
         with conn.transaction():
+            act_as(conn, label="system:init_db")
             conn.execute(
                 "INSERT INTO accounts (name, kind) SELECT %s, 'system' "
                 "WHERE NOT EXISTS (SELECT 1 FROM accounts WHERE kind = 'system' AND name = %s)",
@@ -53,10 +54,12 @@ def main() -> None:
         for username, role, env, default in SEED_USERS:
             row = conn.execute("SELECT id FROM users WHERE username = %s", (username,)).fetchone()
             if row is None:
-                row = conn.execute(
-                    "INSERT INTO users (username, password_hash, role) VALUES (%s, %s, %s) RETURNING id",
-                    (username, hash_password(os.environ.get(env, default)), role),
-                ).fetchone()
+                with conn.transaction():
+                    act_as(conn, label="system:init_db")
+                    row = conn.execute(
+                        "INSERT INTO users (username, password_hash, role) VALUES (%s, %s, %s) RETURNING id",
+                        (username, hash_password(os.environ.get(env, default)), role),
+                    ).fetchone()
                 print(f"created user {username} ({role})")
             ids[username] = row["id"]
 
@@ -67,6 +70,7 @@ def main() -> None:
             ).fetchone()
             if row is None:
                 with conn.transaction():
+                    act_as(conn, label="system:init_db")
                     row = conn.execute(
                         "INSERT INTO accounts (owner_id, name, kind, overdraft_limit) VALUES (%s, %s, 'customer', %s) RETURNING id",
                         (ids[owner], name, overdraft),

@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 import bcrypt
 from fastapi import Depends, Header, HTTPException
+from psycopg.types.json import Jsonb
 
 from .db import pool
 from .ledger import Actor
@@ -33,39 +34,56 @@ def _token_hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+def _audit(conn, actor_id, label, action, target_id, details) -> None:
+    conn.execute(
+        "INSERT INTO audit_log (actor_id, actor_label, action, target_type, target_id, details)"
+        " VALUES (%s, %s, %s, 'user', %s, %s)",
+        (actor_id, label, action, target_id, Jsonb(details)),
+    )
+
+
 def login(username: str, password: str) -> tuple[str, dict]:
+    outcome = "ok"
     with pool().connection() as conn:
         with conn.transaction():
             recent = conn.execute(
                 "SELECT count(*) AS n FROM login_failures WHERE username = %s AND failed_at > now() - %s::interval",
                 (username, f"{LOCKOUT_MINUTES} minutes"),
             ).fetchone()["n"]
-            if recent >= MAX_FAILED_LOGINS:
-                raise HTTPException(429, detail={"code": "too_many_attempts",
-                                                 "message": f"Too many failed logins. Try again in {LOCKOUT_MINUTES} minutes."})
             user = conn.execute(
                 "SELECT id, username, role, password_hash, is_active FROM users WHERE username = %s", (username,)
             ).fetchone()
-            ok = check_password(password, user["password_hash"] if user else _DUMMY_HASH)
-            if not user or not ok or not user["is_active"]:
-                conn.execute("INSERT INTO login_failures (username) VALUES (%s)", (username,))
-                failed = True
+            if recent >= MAX_FAILED_LOGINS:
+                outcome = "locked"
+                _audit(conn, None, "anonymous", "login_locked_out", user["id"] if user else None,
+                       {"username": username})
             else:
-                failed = False
-                token = secrets.token_urlsafe(32)
-                conn.execute(
-                    "INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (%s, %s, %s)",
-                    (_token_hash(token), user["id"], datetime.now(timezone.utc) + timedelta(hours=SESSION_HOURS)),
-                )
-        if failed:
-            raise HTTPException(401, detail={"code": "bad_credentials", "message": "Wrong username or password."})
+                ok = check_password(password, user["password_hash"] if user else _DUMMY_HASH)
+                if not user or not ok or not user["is_active"]:
+                    outcome = "failed"
+                    conn.execute("INSERT INTO login_failures (username) VALUES (%s)", (username,))
+                    _audit(conn, None, "anonymous", "login_failed", user["id"] if user else None,
+                           {"username": username})
+                else:
+                    token = secrets.token_urlsafe(32)
+                    conn.execute(
+                        "INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (%s, %s, %s)",
+                        (_token_hash(token), user["id"], datetime.now(timezone.utc) + timedelta(hours=SESSION_HOURS)),
+                    )
+                    _audit(conn, user["id"], f"user:{user['id']}", "login", user["id"], {})
+    if outcome == "locked":
+        raise HTTPException(429, detail={"code": "too_many_attempts",
+                                         "message": f"Too many failed logins. Try again in {LOCKOUT_MINUTES} minutes."})
+    if outcome == "failed":
+        raise HTTPException(401, detail={"code": "bad_credentials", "message": "Wrong username or password."})
     return token, {"id": user["id"], "username": user["username"], "role": user["role"]}
 
 
-def logout(token: str) -> None:
+def logout(token: str, actor: Actor) -> None:
     with pool().connection() as conn:
         with conn.transaction():
             conn.execute("DELETE FROM sessions WHERE token_hash = %s", (_token_hash(token),))
+            _audit(conn, actor.id, f"user:{actor.id}", "logout", actor.id, {})
 
 
 def _bearer(authorization: str | None) -> str:

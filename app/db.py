@@ -43,3 +43,12 @@ def close_pool() -> None:
 
 def apply_schema(conn) -> None:
     conn.execute(SCHEMA_PATH.read_text())
+
+
+def act_as(conn, actor_id: int | None = None, label: str | None = None) -> None:
+    """Tell the audit triggers who is making the changes in the current transaction.
+    Transaction-local, so it can never leak to the next request on a pooled connection."""
+    if actor_id is not None:
+        conn.execute("SELECT set_config('ledgerline.actor_id', %s, true)", (str(actor_id),))
+    if label is not None:
+        conn.execute("SELECT set_config('ledgerline.actor_label', %s, true)", (label,))

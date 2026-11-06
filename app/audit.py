@@ -1,9 +1,45 @@
 """Read-only checks an auditor (or admin) can run against the live ledger."""
 from __future__ import annotations
 
+import hashlib
+
 from .ledger import txn_hash
 
 LARGE_AMOUNT = 10_000_000  # Rs 1,00,000 in paise
+
+
+def audit_row_text(r: dict) -> str:
+    """Must build exactly the text that audit_chain() in schema.sql hashes."""
+    return "|".join([
+        r["prev_hash"], str(r["seq"]), r["at_text"],
+        "" if r["actor_id"] is None else str(r["actor_id"]), r["actor_label"], r["action"],
+        r["target_type"], "" if r["target_id"] is None else str(r["target_id"]), r["details_text"],
+    ])
+
+
+def verify_audit_chain(conn) -> list[str]:
+    """Recompute the audit log's hash chain here in Python, so a tampered database
+    function cannot vouch for itself."""
+    problems = []
+    rows = conn.execute(
+        """SELECT seq, actor_id, actor_label, action, target_type, target_id, prev_hash, row_hash,
+                  to_char(at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US') AS at_text,
+                  details::text AS details_text
+             FROM audit_log ORDER BY seq"""
+    ).fetchall()
+    prev = "0" * 64
+    for i, r in enumerate(rows, start=1):
+        if r["seq"] != i:
+            problems.append(f"audit log gap: expected seq {i}, found {r['seq']}")
+        if r["prev_hash"] != prev:
+            problems.append(f"audit entry {r['seq']}: prev_hash does not match previous entry")
+        if hashlib.sha256(audit_row_text(r).encode()).hexdigest() != r["row_hash"]:
+            problems.append(f"audit entry {r['seq']}: contents do not match its hash (row was altered)")
+        prev = r["row_hash"]
+    head = conn.execute("SELECT seq, head_hash FROM audit_head WHERE id = 1").fetchone()
+    if head["seq"] != len(rows) or head["head_hash"] != prev:
+        problems.append("audit_head does not match the last audit entry (rows removed or added out of band)")
+    return problems
 
 
 def verify(conn) -> dict:
@@ -74,6 +110,9 @@ def verify(conn) -> dict:
             f"customer balances {total_customer} != external money in minus out {net_external}"
         )
 
+    problems.extend(verify_audit_chain(conn))
+    audit_head = conn.execute("SELECT seq, head_hash FROM audit_head WHERE id = 1").fetchone()
+
     return {
         "ok": not problems,
         "problems": problems,
@@ -86,6 +125,8 @@ def verify(conn) -> dict:
         "external_out": ext["money_out"],
         "head_hash": head["head_hash"],
         "head_seq": head["seq"],
+        "audit_head_hash": audit_head["head_hash"],
+        "audit_head_seq": audit_head["seq"],
     }
 
 
@@ -140,6 +181,37 @@ def flags(conn) -> list[dict]:
     ).fetchall():
         out.append({"severity": "low", "type": "in_overdraft", "account_id": r["id"],
                     "detail": f"account {r['id']} at {r['balance']} paise (limit {r['overdraft_limit']})"})
+
+    for r in conn.execute(
+        """SELECT seq, actor_label, action, target_type, target_id, details FROM audit_log
+            WHERE actor_label LIKE 'db:%' ORDER BY seq DESC LIMIT 200"""
+    ).fetchall():
+        out.append({"severity": "high", "type": "change_made_directly_in_database", "audit_seq": r["seq"],
+                    "detail": f"{r['action']} on {r['target_type']} {r['target_id']} by {r['actor_label']}, "
+                              f"not through the app: {r['details']}"})
+
+    for r in conn.execute(
+        """SELECT seq, actor_label, target_id, details FROM audit_log
+            WHERE action = 'user_updated' AND (details ? 'role' OR details ? 'is_active')
+            ORDER BY seq DESC LIMIT 200"""
+    ).fetchall():
+        out.append({"severity": "medium", "type": "user_rights_changed", "audit_seq": r["seq"],
+                    "detail": f"user {r['target_id']} changed by {r['actor_label']}: {r['details']}"})
+
+    for r in conn.execute(
+        """SELECT seq, actor_label, target_id, details FROM audit_log
+            WHERE action = 'account_updated' AND details ? 'overdraft_limit' ORDER BY seq DESC LIMIT 200"""
+    ).fetchall():
+        out.append({"severity": "low", "type": "overdraft_limit_changed", "audit_seq": r["seq"],
+                    "detail": f"account {r['target_id']} by {r['actor_label']}: {r['details']}"})
+
+    for r in conn.execute(
+        """SELECT details->>'username' AS username, count(*) AS n FROM audit_log
+            WHERE action IN ('login_failed', 'login_locked_out') AND at > now() - interval '24 hours'
+            GROUP BY 1 HAVING count(*) >= 5"""
+    ).fetchall():
+        out.append({"severity": "medium", "type": "repeated_failed_logins",
+                    "detail": f"{r['n']} failed logins for {r['username']!r} in 24h"})
 
     report = verify(conn)
     if not report["ok"]:

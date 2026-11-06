@@ -40,8 +40,8 @@ MUTATIONS = [
      "CONSTRAINT balance_floor CHECK (kind = 'system' OR balance >= -overdraft_limit),",
      "", True),
     ("remove the append-only triggers", "app/schema.sql",
-     "FOREACH t IN ARRAY ARRAY['transactions', 'postings', 'request_log', 'admin_events'] LOOP",
-     "FOREACH t IN ARRAY ARRAY['admin_events'] LOOP", True),
+     "FOREACH t IN ARRAY ARRAY['transactions', 'postings', 'request_log', 'audit_log'] LOOP",
+     "FOREACH t IN ARRAY ARRAY['audit_log'] LOOP", True),
     ("remove the system-account guard", "app/ledger.py",
      'if any(found[a]["kind"] == "system" for a in user_named):', 'if False:', True),
     # Expected to SURVIVE: this lookup is only a shortcut; the unique index is the guarantee.

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import logging
 import re
 from contextlib import asynccontextmanager
@@ -15,7 +14,7 @@ from psycopg import errors
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 from . import audit, auth, ledger
-from .db import close_pool, init_pool, pool
+from .db import act_as, close_pool, init_pool, pool
 from .ledger import MAX_AMOUNT, Actor, LedgerError
 
 log = logging.getLogger("ledgerline")
@@ -120,6 +119,11 @@ class UserIn(Strict):
     role: Literal["admin", "holder", "auditor"]
 
 
+class UserPatch(Strict):
+    role: Literal["admin", "holder", "auditor"] | None = None
+    is_active: bool | None = None
+
+
 class AccountIn(Strict):
     name: str = Field(min_length=1, max_length=80)
     owner_id: AccountId | None = None
@@ -217,8 +221,8 @@ def login(body: LoginIn):
 
 
 @app.post("/api/auth/logout")
-def logout(token: str = Depends(auth.current_token), _: Actor = Depends(auth.current_actor)):
-    auth.logout(token)
+def logout(token: str = Depends(auth.current_token), actor: Actor = Depends(auth.current_actor)):
+    auth.logout(token, actor)
     return {"ok": True}
 
 
@@ -237,6 +241,7 @@ def create_user(body: UserIn, actor: Actor = Depends(auth.require("admin"))):
     pw = auth.hash_password(body.password)
     with pool().connection() as conn:
         with conn.transaction():
+            act_as(conn, actor.id)
             try:
                 row = conn.execute(
                     "INSERT INTO users (username, password_hash, role) VALUES (%s, %s, %s) RETURNING id",
@@ -244,10 +249,6 @@ def create_user(body: UserIn, actor: Actor = Depends(auth.require("admin"))):
                 ).fetchone()
             except errors.UniqueViolation:
                 raise HTTPException(409, detail={"code": "username_taken", "message": "Username already exists."})
-            conn.execute(
-                "INSERT INTO admin_events (actor_id, action, target_type, target_id, details) VALUES (%s,'create_user','user',%s,%s)",
-                (actor.id, row["id"], json.dumps({"username": body.username, "role": body.role})),
-            )
     return {"id": row["id"], "username": body.username, "role": body.role}
 
 
@@ -256,6 +257,46 @@ def list_users(_: Actor = Depends(auth.require("admin", "auditor"))):
     with pool().connection() as conn:
         rows = conn.execute("SELECT id, username, role, is_active, created_at FROM users ORDER BY id").fetchall()
     return [{**r, "created_at": r["created_at"].isoformat()} for r in rows]
+
+
+@app.patch("/api/users/{user_id}")
+def patch_user(user_id: int, body: UserPatch, actor: Actor = Depends(auth.require("admin"))):
+    """Administrative override on a user: change role, deactivate, reactivate."""
+    if body.role is None and body.is_active is None:
+        raise HTTPException(400, detail={"code": "nothing_to_change", "message": "Send role and/or is_active."})
+    if user_id == actor.id:
+        raise HTTPException(422, detail={"code": "self_change",
+                                         "message": "Admins cannot change their own role or deactivate themselves."})
+    with pool().connection() as conn:
+        with conn.transaction():
+            act_as(conn, actor.id)
+            # Lock every admin row so two admins demoting each other at once can't
+            # leave the system with none.
+            conn.execute("SELECT id FROM users WHERE role = 'admin' ORDER BY id FOR UPDATE")
+            user = conn.execute("SELECT * FROM users WHERE id = %s FOR UPDATE", (user_id,)).fetchone()
+            if user is None:
+                raise HTTPException(404, detail={"code": "user_not_found", "message": "No such user."})
+            new_role = body.role or user["role"]
+            new_active = user["is_active"] if body.is_active is None else body.is_active
+            if new_role != "holder" and user["role"] == "holder":
+                owns = conn.execute("SELECT 1 FROM accounts WHERE owner_id = %s LIMIT 1", (user_id,)).fetchone()
+                if owns:
+                    raise HTTPException(422, detail={"code": "owns_accounts",
+                                                     "message": "This user owns accounts, so must stay a holder."})
+            if user["role"] == "admin" and (new_role != "admin" or not new_active):
+                others = conn.execute(
+                    "SELECT count(*) AS n FROM users WHERE role = 'admin' AND is_active AND id <> %s", (user_id,)
+                ).fetchone()["n"]
+                if others == 0:
+                    raise HTTPException(422, detail={"code": "last_admin", "message": "Cannot remove the last admin."})
+            row = conn.execute(
+                "UPDATE users SET role = %s, is_active = %s WHERE id = %s RETURNING id, username, role, is_active",
+                (new_role, new_active, user_id),
+            ).fetchone()
+            if not new_active or new_role != user["role"]:
+                # A changed or disabled user must log in again under their new rights.
+                conn.execute("DELETE FROM sessions WHERE user_id = %s", (user_id,))
+    return row
 
 
 # --------------------------------------------------------------------------
@@ -286,6 +327,7 @@ def create_account(body: AccountIn, actor: Actor = Depends(auth.require("admin",
         owner_id = body.owner_id
     with pool().connection() as conn:
         with conn.transaction():
+            act_as(conn, actor.id)
             owner = conn.execute("SELECT role FROM users WHERE id = %s", (owner_id,)).fetchone()
             if owner is None or owner["role"] != "holder":
                 raise HTTPException(422, detail={"code": "bad_owner", "message": "Accounts belong to account holders."})
@@ -293,10 +335,6 @@ def create_account(body: AccountIn, actor: Actor = Depends(auth.require("admin",
                 "INSERT INTO accounts (owner_id, name, kind) VALUES (%s, %s, 'customer') RETURNING *",
                 (owner_id, body.name),
             ).fetchone()
-            conn.execute(
-                "INSERT INTO admin_events (actor_id, action, target_type, target_id, details) VALUES (%s,'open_account','account',%s,%s)",
-                (actor.id, row["id"], json.dumps({"owner_id": owner_id, "name": body.name})),
-            )
     return _acct_json(row)
 
 
@@ -321,6 +359,7 @@ def patch_account(account_id: int, body: AccountPatch, actor: Actor = Depends(au
     with pool().connection() as conn:
         with conn.transaction():
             conn.execute("SET LOCAL lock_timeout = '5s'")
+            act_as(conn, actor.id)
             acct = conn.execute("SELECT * FROM accounts WHERE id = %s FOR UPDATE", (account_id,)).fetchone()
             if acct is None:
                 raise HTTPException(404, detail={"code": "account_not_found", "message": "No such account."})
@@ -339,12 +378,6 @@ def patch_account(account_id: int, body: AccountPatch, actor: Actor = Depends(au
                 "UPDATE accounts SET status = %s, overdraft_limit = %s WHERE id = %s RETURNING *",
                 (new_status, new_limit, account_id),
             ).fetchone()
-            conn.execute(
-                "INSERT INTO admin_events (actor_id, action, target_type, target_id, details) VALUES (%s,'update_account','account',%s,%s)",
-                (actor.id, account_id, json.dumps({
-                    "status": [acct["status"], new_status],
-                    "overdraft_limit": [acct["overdraft_limit"], new_limit]})),
-            )
     return _acct_json(row)
 
 
@@ -438,15 +471,24 @@ def audit_transactions(limit: int = 200, _: Actor = Depends(auth.require("admin"
         return [ledger.transaction_view(conn, i) for i in ids]
 
 
-@app.get("/api/audit/admin-events")
-def admin_events(limit: int = 200, _: Actor = Depends(auth.require("admin", "auditor"))):
+@app.get("/api/audit/log")
+def audit_log(target_type: str | None = None, target_id: int | None = None, limit: int = 200,
+              _: Actor = Depends(auth.require("admin", "auditor"))):
+    """Every change to users and accounts, plus logins. Written by database triggers."""
     limit = max(1, min(limit, 2000))
+    sql = """SELECT seq, at, actor_id, actor_label, action, target_type, target_id, details
+               FROM audit_log WHERE TRUE"""
+    params: list = []
+    if target_type:
+        sql += " AND target_type = %s"
+        params.append(target_type)
+    if target_id is not None:
+        sql += " AND target_id = %s"
+        params.append(target_id)
+    sql += " ORDER BY seq DESC LIMIT %s"
+    params.append(limit)
     with pool().connection() as conn:
-        rows = conn.execute(
-            """SELECT e.id, e.at, u.username AS actor, e.action, e.target_type, e.target_id, e.details
-                 FROM admin_events e JOIN users u ON u.id = e.actor_id ORDER BY e.id DESC LIMIT %s""",
-            (limit,),
-        ).fetchall()
+        rows = conn.execute(sql, params).fetchall()
     return [{**r, "at": r["at"].isoformat()} for r in rows]
 
 

@@ -125,16 +125,32 @@ CREATE TABLE IF NOT EXISTS request_log (
 );
 CREATE INDEX IF NOT EXISTS request_log_key ON request_log (user_id, idempotency_key);
 
--- Administrative changes that are not money movements (freeze, overdraft limit, new user).
-CREATE TABLE IF NOT EXISTS admin_events (
-    id          BIGSERIAL PRIMARY KEY,
-    at          TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-    actor_id    BIGINT NOT NULL REFERENCES users(id),
+-- Audit log: every change to users and accounts (other than balances, which the
+-- ledger itself records), every login, logout and failed login. Rows are written by
+-- database triggers, so a change cannot skip the log - not even one made with raw SQL.
+-- Each row is hash-chained to the previous one (separate chain from the money ledger).
+CREATE TABLE IF NOT EXISTS audit_log (
+    seq         BIGINT PRIMARY KEY,                 -- set by trigger
+    at          TIMESTAMPTZ NOT NULL,               -- set by trigger
+    actor_id    BIGINT REFERENCES users(id),        -- NULL for anonymous or direct-DB changes
+    actor_label TEXT NOT NULL,                      -- 'user:5', 'db:postgres', 'system:init_db', 'anonymous'
     action      TEXT NOT NULL,
     target_type TEXT NOT NULL,
-    target_id   BIGINT NOT NULL,
-    details     JSONB NOT NULL DEFAULT '{}'::jsonb
+    target_id   BIGINT,
+    details     JSONB NOT NULL DEFAULT '{}'::jsonb,
+    prev_hash   TEXT NOT NULL,                      -- set by trigger
+    row_hash    TEXT NOT NULL UNIQUE                -- set by trigger
 );
+CREATE INDEX IF NOT EXISTS audit_log_target ON audit_log (target_type, target_id);
+
+CREATE TABLE IF NOT EXISTS audit_head (
+    id        INT PRIMARY KEY CHECK (id = 1),
+    seq       BIGINT NOT NULL,
+    head_hash TEXT NOT NULL
+);
+INSERT INTO audit_head (id, seq, head_hash)
+VALUES (1, 0, repeat('0', 64))
+ON CONFLICT (id) DO NOTHING;
 
 -- ---------------------------------------------------------------------------
 -- Append-only enforcement
@@ -149,7 +165,7 @@ $$ LANGUAGE plpgsql;
 DO $$
 DECLARE t TEXT;
 BEGIN
-    FOREACH t IN ARRAY ARRAY['transactions', 'postings', 'request_log', 'admin_events'] LOOP
+    FOREACH t IN ARRAY ARRAY['transactions', 'postings', 'request_log', 'audit_log'] LOOP
         EXECUTE format('DROP TRIGGER IF EXISTS %I_no_update_delete ON %I', t, t);
         EXECUTE format('CREATE TRIGGER %I_no_update_delete BEFORE UPDATE OR DELETE ON %I
                         FOR EACH ROW EXECUTE FUNCTION ledger_reject_change()', t, t);
@@ -226,3 +242,121 @@ DROP TRIGGER IF EXISTS accounts_balance_matches_ledger ON accounts;
 CREATE CONSTRAINT TRIGGER accounts_balance_matches_ledger AFTER INSERT OR UPDATE OF balance ON accounts
     DEFERRABLE INITIALLY DEFERRED
     FOR EACH ROW EXECUTE FUNCTION ledger_check_account_balance();
+
+-- ---------------------------------------------------------------------------
+-- Audit chain and automatic audit triggers
+-- ---------------------------------------------------------------------------
+
+-- Fills seq, at, prev_hash and row_hash on every audit_log insert, whatever the caller
+-- supplied, so nobody can backdate or reorder an entry. SECURITY DEFINER so the app's
+-- restricted DB role needs only INSERT on audit_log, not write access to audit_head.
+-- The hashed text is rebuilt in Python by app/audit.py:audit_row_text(); keep them identical.
+CREATE OR REPLACE FUNCTION audit_chain() RETURNS trigger
+SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+    h RECORD;
+BEGIN
+    SELECT seq, head_hash INTO h FROM audit_head WHERE id = 1 FOR UPDATE;
+    NEW.seq := h.seq + 1;
+    NEW.at := clock_timestamp();
+    NEW.prev_hash := h.head_hash;
+    NEW.row_hash := encode(sha256(convert_to(
+        NEW.prev_hash || '|' || NEW.seq::text || '|'
+        || to_char(NEW.at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US') || '|'
+        || COALESCE(NEW.actor_id::text, '') || '|' || NEW.actor_label || '|' || NEW.action || '|'
+        || NEW.target_type || '|' || COALESCE(NEW.target_id::text, '') || '|' || NEW.details::text,
+        'UTF8')), 'hex');
+    UPDATE audit_head SET seq = NEW.seq, head_hash = NEW.row_hash WHERE id = 1;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS audit_log_chain ON audit_log;
+CREATE TRIGGER audit_log_chain BEFORE INSERT ON audit_log
+    FOR EACH ROW EXECUTE FUNCTION audit_chain();
+
+-- Who is acting. The app sets ledgerline.actor_id (transaction-local) before writing.
+-- If nobody set it, the change came straight from SQL and is labelled with the DB user.
+CREATE OR REPLACE FUNCTION audit_actor(OUT actor_id BIGINT, OUT actor_label TEXT) AS $$
+BEGIN
+    actor_id := NULLIF(current_setting('ledgerline.actor_id', true), '')::BIGINT;
+    actor_label := COALESCE(
+        NULLIF(current_setting('ledgerline.actor_label', true), ''),
+        CASE WHEN actor_id IS NULL THEN 'db:' || session_user ELSE 'user:' || actor_id END);
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION audit_users() RETURNS trigger
+SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+    a RECORD;
+    d JSONB := '{}'::jsonb;
+BEGIN
+    SELECT * INTO a FROM audit_actor();
+    IF TG_OP = 'INSERT' THEN
+        INSERT INTO audit_log (actor_id, actor_label, action, target_type, target_id, details)
+        VALUES (a.actor_id, a.actor_label, 'user_created', 'user', NEW.id,
+                jsonb_build_object('username', NEW.username, 'role', NEW.role));
+        RETURN NULL;
+    END IF;
+    IF NEW.username IS DISTINCT FROM OLD.username THEN d := d || jsonb_build_object('username', jsonb_build_array(OLD.username, NEW.username)); END IF;
+    IF NEW.role IS DISTINCT FROM OLD.role THEN d := d || jsonb_build_object('role', jsonb_build_array(OLD.role, NEW.role)); END IF;
+    IF NEW.is_active IS DISTINCT FROM OLD.is_active THEN d := d || jsonb_build_object('is_active', jsonb_build_array(OLD.is_active, NEW.is_active)); END IF;
+    IF NEW.password_hash IS DISTINCT FROM OLD.password_hash THEN d := d || '{"password": "changed"}'::jsonb; END IF;
+    IF d <> '{}'::jsonb THEN
+        INSERT INTO audit_log (actor_id, actor_label, action, target_type, target_id, details)
+        VALUES (a.actor_id, a.actor_label, 'user_updated', 'user', NEW.id, d);
+    END IF;
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS users_audit ON users;
+CREATE TRIGGER users_audit AFTER INSERT OR UPDATE ON users
+    FOR EACH ROW EXECUTE FUNCTION audit_users();
+
+-- Balance changes are deliberately NOT logged here: the ledger is their record.
+CREATE OR REPLACE FUNCTION audit_accounts() RETURNS trigger
+SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+    a RECORD;
+    d JSONB := '{}'::jsonb;
+BEGIN
+    SELECT * INTO a FROM audit_actor();
+    IF TG_OP = 'INSERT' THEN
+        INSERT INTO audit_log (actor_id, actor_label, action, target_type, target_id, details)
+        VALUES (a.actor_id, a.actor_label, 'account_opened', 'account', NEW.id,
+                jsonb_build_object('owner_id', NEW.owner_id, 'name', NEW.name, 'kind', NEW.kind,
+                                   'overdraft_limit', NEW.overdraft_limit));
+        RETURN NULL;
+    END IF;
+    IF NEW.name IS DISTINCT FROM OLD.name THEN d := d || jsonb_build_object('name', jsonb_build_array(OLD.name, NEW.name)); END IF;
+    IF NEW.status IS DISTINCT FROM OLD.status THEN d := d || jsonb_build_object('status', jsonb_build_array(OLD.status, NEW.status)); END IF;
+    IF NEW.overdraft_limit IS DISTINCT FROM OLD.overdraft_limit THEN d := d || jsonb_build_object('overdraft_limit', jsonb_build_array(OLD.overdraft_limit, NEW.overdraft_limit)); END IF;
+    IF d <> '{}'::jsonb THEN
+        INSERT INTO audit_log (actor_id, actor_label, action, target_type, target_id, details)
+        VALUES (a.actor_id, a.actor_label, 'account_updated', 'account', NEW.id, d);
+    END IF;
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS accounts_audit ON accounts;
+CREATE TRIGGER accounts_audit AFTER INSERT OR UPDATE ON accounts
+    FOR EACH ROW EXECUTE FUNCTION audit_accounts();
+
+-- Who owns an account, and what kind it is, never changes. The ledger relies on this:
+-- it reads ownership before taking the row lock.
+CREATE OR REPLACE FUNCTION accounts_freeze_identity() RETURNS trigger AS $$
+BEGIN
+    IF NEW.owner_id IS DISTINCT FROM OLD.owner_id OR NEW.kind IS DISTINCT FROM OLD.kind THEN
+        RAISE EXCEPTION 'LEDGER_INTEGRITY: account owner and kind cannot change'
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS accounts_identity_fixed ON accounts;
+CREATE TRIGGER accounts_identity_fixed BEFORE UPDATE ON accounts
+    FOR EACH ROW EXECUTE FUNCTION accounts_freeze_identity();

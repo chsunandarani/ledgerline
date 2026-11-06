@@ -165,7 +165,7 @@ function showJSON(data) { $("#auditOut").replaceChildren(el("pre", {}, JSON.stri
 $("#verifyBtn").addEventListener("click", async () => showJSON((await api("GET", "/api/audit/verify")).data));
 $("#flagsBtn").addEventListener("click", async () => showJSON((await api("GET", "/api/audit/flags")).data));
 $("#dupesBtn").addEventListener("click", async () => showJSON((await api("GET", "/api/audit/requests?outcome=replayed")).data));
-$("#eventsBtn").addEventListener("click", async () => showJSON((await api("GET", "/api/audit/admin-events")).data));
+$("#eventsBtn").addEventListener("click", async () => showJSON((await api("GET", "/api/audit/log")).data));
 
 $("#loginForm").addEventListener("submit", async ev => {
   ev.preventDefault();

@@ -76,7 +76,8 @@ def test_reversal_cannot_overdraw_the_payee(admin, make_holder, make_account):
     "TRUNCATE postings CASCADE",
     "TRUNCATE transactions CASCADE",
     "DELETE FROM request_log",
-    "UPDATE admin_events SET action = 'x'",
+    "UPDATE audit_log SET action = 'x'",
+    "DELETE FROM audit_log",
     "DELETE FROM accounts",
 ])
 def test_ledger_rows_cannot_be_changed_or_deleted(sql, make_holder, make_account, stmt):
