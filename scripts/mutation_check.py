@@ -59,6 +59,9 @@ MUTATIONS = [
     ("remove the trigger that freezes account owner", "app/schema.sql",
      "CREATE TRIGGER accounts_identity_fixed BEFORE UPDATE ON accounts\n    FOR EACH ROW EXECUTE FUNCTION accounts_freeze_identity();",
      "", True),
+    ("give the app's DB role UPDATE/DELETE on the ledger", "scripts/app_role.sql",
+     "GRANT SELECT, INSERT ON transactions, postings, request_log, audit_log TO ledger_app;",
+     "GRANT SELECT, INSERT, UPDATE, DELETE ON transactions, postings, request_log, audit_log TO ledger_app;", True),
     # Expected to SURVIVE: this lookup is only a shortcut; the unique index is the guarantee.
     ("remove the post-lock idempotency re-check (shortcut only)", "app/ledger.py",
      "    # A concurrent duplicate may have committed while we waited for the lock.\n"
