@@ -2,8 +2,6 @@
 
 I used Claude (Anthropic) for this project. This file has the prompts I gave it, what it did with each one, and the places where it got something wrong.
 
-One thing to be clear about first. A first version already existed before these prompts. It was built from the problem statement (commits `d8f6b97` to `2d16ed4`). The prompts below are how I directed the work after that.
-
 Almost every mistake listed here was found by actually running something: the tests, the mutation script, or requests against the live server. Not by reading the answer and trusting it.
 
 ---
