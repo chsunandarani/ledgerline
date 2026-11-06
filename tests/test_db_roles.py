@@ -34,6 +34,9 @@ def _url_as(db_url, user, password):
 
 @pytest.fixture(scope="module")
 def role_urls(db_url, base_url):  # base_url: make sure the schema and admin exist
+    from conftest import SUPERUSER_REASON, _is_superuser
+    if not _is_superuser(db_url):
+        pytest.skip(SUPERUSER_REASON)
     with psycopg.connect(db_url, autocommit=True) as conn:
         conn.execute((ROOT / "scripts" / "app_role.sql").read_text())
         conn.execute(f"ALTER ROLE ledger_app PASSWORD '{APP_PASSWORD}'")

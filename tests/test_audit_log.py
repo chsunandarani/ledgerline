@@ -84,7 +84,7 @@ def test_audit_entries_cannot_be_forged_or_backdated(sql, admin, verify_ok):
     verify_ok()
 
 
-def test_audit_tampering_is_detected(sql, admin, make_holder, verify_ok):
+def test_audit_tampering_is_detected(needs_superuser, sql, admin, make_holder, verify_ok):
     holder = make_holder()
     seq = _entries(admin, "user", holder.user["id"])[0]["seq"]
     sql.execute("SET session_replication_role = replica")

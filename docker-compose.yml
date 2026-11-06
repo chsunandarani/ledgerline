@@ -1,5 +1,6 @@
-# Local run with nothing installed but Docker:  docker compose up --build
-# then open http://localhost:8000
+# Run everything with only Docker installed:
+#   docker compose up --build        -> http://localhost:8000  (seed logins in README)
+#   docker compose down -v           -> stop and delete the data
 services:
   db:
     image: postgres:16
@@ -7,11 +8,13 @@ services:
       POSTGRES_USER: ledger
       POSTGRES_PASSWORD: ledger
       POSTGRES_DB: ledger
-    ports: ["5432:5432"]
+    ports: ["5432:5432"]          # so tests on your machine can reach it
+    volumes: [dbdata:/var/lib/postgresql/data]
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ledger"]
+      test: ["CMD-SHELL", "pg_isready -U ledger -d ledger"]
       interval: 2s
-      retries: 20
+      retries: 30
+
   app:
     build: .
     environment:
@@ -20,3 +23,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  dbdata:

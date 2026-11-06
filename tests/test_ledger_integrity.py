@@ -135,7 +135,7 @@ def test_database_floor_holds_even_without_the_app(sql, make_holder, make_accoun
     assert h.balance(acct) == 1_000
 
 
-def test_tampering_by_a_superuser_is_detected(sql, admin, make_holder, make_account, verify_ok):
+def test_tampering_by_a_superuser_is_detected(needs_superuser, sql, admin, make_holder, make_account, verify_ok):
     """Someone with full database rights switches the triggers off and quietly shrinks a
     payment. The triggers can't stop a superuser, but the hash chain shows it."""
     a, b = make_holder(), make_holder()

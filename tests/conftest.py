@@ -180,3 +180,25 @@ def verify_ok(admin):
         assert report["ok"], report["problems"]
         return report
     return _check
+
+
+def _is_superuser(url) -> bool:
+    with psycopg.connect(url) as conn:
+        return conn.execute("SELECT rolsuper OR rolcreaterole FROM pg_roles WHERE rolname = current_user").fetchone()[0]
+
+
+SUPERUSER_REASON = ("needs TEST_DATABASE_URL to connect as a Postgres superuser (it switches triggers off to "
+                    "simulate tampering, and creates roles). The default user of a local or Docker Postgres is one.")
+
+
+@pytest.fixture
+def needs_superuser(db_url):
+    if not _is_superuser(db_url):
+        pytest.skip(SUPERUSER_REASON)
+
+
+def pytest_terminal_summary(terminalreporter):
+    skipped = terminalreporter.stats.get("skipped", [])
+    if skipped:
+        terminalreporter.write_line(
+            f"\nNOTE: {len(skipped)} test(s) skipped - not passed. Reason: {SUPERUSER_REASON}", yellow=True)
